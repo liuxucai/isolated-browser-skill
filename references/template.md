@@ -1,6 +1,6 @@
 # 复制即用模板（B 路线 · 独立浏览器）
 
-跨平台、无硬编码。端口取未被占用的即可（默认 9222）。
+跨平台、无硬编码。端口取未被占用的即可（默认 9222）。profile 固定为当前用户目录下的 `.chrome_qclaw_stable`，可用 `ISOB_PROFILE_DIR` 覆盖。
 
 ## JS：拉起隔离 Chrome
 
@@ -9,7 +9,7 @@ const { spawn } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 
 const CDP_PORT = process.env.ISOB_CDP_PORT || 9222;          // 任取未占用端口
-const PROFILE  = process.env.ISOB_PROFILE_DIR || path.join(os.homedir(), '.qclaw_isolated_chrome');
+const PROFILE  = process.env.ISOB_PROFILE_DIR || path.join(os.homedir(), '.chrome_qclaw_stable');
 const chrome   = process.env.AGENT_BROWSER_EXECUTABLE_PATH || 'chrome';
 
 fs.mkdirSync(PROFILE, { recursive: true });
