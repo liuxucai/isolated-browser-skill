@@ -5,6 +5,39 @@ description: 启动一个与用户默认浏览器完全隔离的独立 Chrome �
 
 # 独立浏览器实例 Skill（B 路线 · 跨平台通用）
 
+## 本机（WorkBuddy 沙箱）适配 —— 2026-09-22 实测
+
+> **本机未安装 `agent-browser` CLI**：上面「用 `agent-browser --cdp` 直连」的示例在本机不可用。
+> 本机的隔离实例依然用本 skill 的 `launch.js` 拉起，**驱动层换成 playwright-core 直连 CDP**。
+> 完整踩坑清单见 [references/pitfalls.md](references/pitfalls.md) 的「2026-09-22 补充」一节。
+
+### 正确用法（本机）
+
+```bash
+# 1) 后台常驻拉起隔离 Chrome —— 必须 run_in_background，且带 sleep 保活
+#    （沙箱会在命令结束时回收 detached 子进程，普通前台调用会导致 Chrome 立刻被杀）
+node skills/isolated-browser/scripts/launch.js "https://mp.toutiao.com/profile_v4/graphic/publish" && sleep 7200
+
+# 2) 驱动层：playwright-core 直连（取代 agent-browser --cdp）
+export OPENCLAW_NODE_MODULES="<home>/.workbuddy/binaries/node/workspace/node_modules"
+node -e "require(process.env.OPENCLAW_NODE_MODULES+'/playwright-core').chromium.connectOverCDP('http://127.0.0.1:9222').then(b=>console.log('ok',b.contexts()[0].pages().length))"
+```
+
+### 本机环境变量
+
+| 变量 | 本机值 |
+|---|---|
+| `ISOB_CDP_PORT` | `9222` |
+| `ISOB_PROFILE_DIR` | 默认 `$HOME/.chrome_qclaw_stable`（登录态已持久化，免重复登录） |
+| `OPENCLAW_NODE_MODULES` | `~/.workbuddy/binaries/node/workspace/node_modules`（含 playwright-core） |
+
+### 仍未就位 / 不可用
+
+- `agent-browser` CLI —— 未安装；`scripts/connect.js` 因此在本机不可用（它是对 agent-browser 的封装）。
+  需要它时先安装再启用；在此之前请直接用 playwright-core。
+- 除本机外的其他环境若已装 agent-browser，仍可按本文档上半部分原方式使用。
+
+
 ## 这是什么
 
 一套"启动隔离 Chrome + agent-browser 直连"的可复用能力。**不依赖 xb CLI**，只依赖：
