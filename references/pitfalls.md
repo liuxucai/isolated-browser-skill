@@ -54,8 +54,8 @@
 
 ### 10. playwright-core 就是本机的驱动层（替代 agent-browser）
 
-- **位置**：`~/.workbuddy/binaries/node/workspace/node_modules/playwright-core`
-- **用法**：任何脚本运行前设 `OPENCLAW_NODE_MODULES` 指向该 `node_modules` 目录。
+- **位置**：不固定，由 `scripts/pathkit.js` 运行时探测（依次试 `OPENCLAW_NODE_MODULES` → WorkBuddy 托管 node 的 workspace → OpenClaw/qclaw 安装目录 → 就近 `node_modules`）。
+- **用法**：脚本 `require('../../isolated-browser/scripts/pathkit.js').resolvePlaywright()` 即可，**不需要**手工设环境变量；要强制指定时才设 `OPENCLAW_NODE_MODULES`。
 - **连接**：`chromium.connectOverCDP('http://127.0.0.1:9222')`，本机实测通过（沙箱内直连 127.0.0.1 无阻）。
 - **`connect.js` 的定位**：它是 `agent-browser --cdp` 封装，本机装好 agent-browser 前不可用；
   需要「连上浏览器 + eval/click/screenshot」时，直接用 playwright-core 写几行即可（参考各 publisher skill 的 `scripts/lib.js`）。
@@ -69,7 +69,7 @@
 
 - **Bash 工具不可靠**：PortableGit bash 下 `ls`/`mkdir`/`git`/`which`/`dirname` 全部 command not found；
   实测同一会话中途 `head`/`grep` 也会丢失。→ 文件检索用专用工具，命令走 PowerShell，复杂逻辑写 Python/Node 脚本。
-- **PowerShell 5.1 中文路径乱码**：`C:\Users\甲骨龙集成电脑\...` 被按 GBK 解码成乱码，`Test-Path` 恒 False。
+- **PowerShell 5.1 中文路径乱码**：形如 `C:\Users\<中文用户名>\...` 的路径被按 GBK 解码成乱码，`Test-Path` 恒 False。
   → 含中文路径的文件操作一律用 Python（`-X utf8`）；PS 脚本里不要写中文字面量，必须写时显式 `-Encoding UTF8`。
 - **PowerShell 工具不回传 stdout**：结果要 `| Out-File $env:TEMP\x.txt -Encoding UTF8` 后再读。
 - **git 不在 PATH**：在 `~/.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe`。

@@ -19,8 +19,8 @@ description: 启动一个与用户默认浏览器完全隔离的独立 Chrome �
 node skills/isolated-browser/scripts/launch.js "https://mp.toutiao.com/profile_v4/graphic/publish" && sleep 7200
 
 # 2) 驱动层：playwright-core 直连（取代 agent-browser --cdp）
-export OPENCLAW_NODE_MODULES="<home>/.workbuddy/binaries/node/workspace/node_modules"
-node -e "require(process.env.OPENCLAW_NODE_MODULES+'/playwright-core').chromium.connectOverCDP('http://127.0.0.1:9222').then(b=>console.log('ok',b.contexts()[0].pages().length))"
+#    路径由 scripts/pathkit.js 自动探测，无需设置环境变量
+node -e "const pk=require('./skills/isolated-browser/scripts/pathkit.js'); pk.chromium().connectOverCDP('http://127.0.0.1:9222').then(b=>console.log('ok',b.contexts()[0].pages().length))"
 ```
 
 ### 本机环境变量
@@ -29,13 +29,44 @@ node -e "require(process.env.OPENCLAW_NODE_MODULES+'/playwright-core').chromium.
 |---|---|
 | `ISOB_CDP_PORT` | `9222` |
 | `ISOB_PROFILE_DIR` | 默认 `$HOME/.chrome_qclaw_stable`（登录态已持久化，免重复登录） |
-| `OPENCLAW_NODE_MODULES` | `~/.workbuddy/binaries/node/workspace/node_modules`（含 playwright-core） |
+| `OPENCLAW_NODE_MODULES` | 可选。含 playwright-core 的 node_modules；不设时由 `scripts/pathkit.js` 自动探测 |
 
 ### 仍未就位 / 不可用
 
 - `agent-browser` CLI —— 未安装；`scripts/connect.js` 因此在本机不可用（它是对 agent-browser 的封装）。
   需要它时先安装再启用；在此之前请直接用 playwright-core。
 - 除本机外的其他环境若已装 agent-browser，仍可按本文档上半部分原方式使用。
+
+## `scripts/pathkit.js` —— 跨机器路径解析（发布类 skill 的公共底座）
+
+所有"路径写死"问题的统一解法。**不写死用户名、盘符、Node 版本号、node_modules 位置**，
+一切由 `os.homedir()` + 环境变量 + 运行时探测推导。跑一下看当前环境解析结果：
+
+```bash
+node skills/isolated-browser/scripts/pathkit.js --info
+```
+
+其他 skill 用相对路径引用即可（`D:\skills` 与 `~/.workbuddy/skills` 两种布局都能解析）：
+
+```js
+const pk = require('../../isolated-browser/scripts/pathkit.js');
+const { chromium } = pk.playwright();        // 自动定位 playwright-core
+pk.nodeExe();                                // 托管 node（取最新版本）
+pk.findChrome();                             // Chrome 可执行文件
+pk.cdpPort();                                // CDP 端口（ISOB_CDP_PORT 可覆盖）
+pk.imageDir();                               // 配图素材目录
+```
+
+| 导出 | 作用 | 可覆盖的环境变量 |
+|---|---|---|
+| `playwright()` / `chromium()` / `resolvePlaywright()` | 定位并加载 playwright-core | `OPENCLAW_NODE_MODULES` |
+| `resolveNodeModules()` | 返回含 playwright-core 的 node_modules 目录 | 同上 |
+| `nodeExe()` | 托管 node 可执行文件（自动取最新版本） | `NODE_EXE` |
+| `findChrome()` | Chrome 可执行文件 | `CHROME_PATH` / `AGENT_BROWSER_EXECUTABLE_PATH` |
+| `cdpPort()` / `profileDir()` | CDP 端口 / 隔离 profile 目录 | `ISOB_CDP_PORT` / `ISOB_PROFILE_DIR` |
+| `isobLaunch()` | 本 skill 的 `launch.js` 绝对路径 | — |
+| `imageDir()` | 配图素材目录 | `PUBLISH_IMAGE_DIR` |
+| `WORKBUDDY_HOME` / `SKILLS_ROOT` | WorkBuddy 用户目录 / skills 根目录 | `WORKBUDDY_HOME` |
 
 
 ## 这是什么
@@ -84,10 +115,22 @@ chrome --new-instance
        --user-data-dir=<$HOME/.chrome_qclaw_stable>
        --remote-debugging-port=<未占用端口>
        --no-first-run --no-default-browser-check
+       --disable-backgrounding-occluded-windows
+       --disable-background-timer-throttling
+       --disable-renderer-backgrounding
+       --disable-features=CalculateNativeWinOcclusion
        <起始URL>
 ```
 
+> **防节流四参数（2026-09-29 实测补充，launch.js 已内置）**：窗口被其他窗口遮挡/最小化时，
+> `document.visibilityState === 'hidden'` 会让页面渲染被节流——懒加载弹窗只挂载空壳
+> （只有取消/确定按钮，无 tab 无内容）、按钮恒 disabled、截图黑屏。
+> `Page.bringToFront` 对被遮挡窗口**无效**，只有启动参数能兜底。
+> 发布类 skill（百家号正文插图弹窗等）强依赖此参数；缺失时的典型症状见
+> baijiahao-publisher `references/troubleshooting.md` 第 I8 条。
+
 后台常驻关键：`spawn(chrome, args, {detached:true, stdio:'ignore'})` 后 `child.unref()`，实例才不会随脚本退出被杀。
+⚠️ 本机（WorkBuddy 沙箱）额外要求：命令必须 `run_in_background: true` 且末尾带 `sleep 7200` 保活，否则沙箱在命令结束时仍会回收 detached 子进程。
 
 ## 与其他 skill 的集成方式
 

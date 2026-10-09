@@ -56,7 +56,14 @@ const args = [
   `--remote-debugging-port=${CDP_PORT}`,             // 开放 CDP，供 agent-browser --cdp 直连
   '--no-first-run',
   '--no-default-browser-check',
-  process.argv[2] || 'https://www.jianshu.com/writer#/', // 起始 URL 可命令行传入
+  // 防后台节流（2026-09-29 实测补充）：窗口被其他窗口遮挡/最小化时，visibilityState=hidden
+  // 会让页面渲染被节流——弹窗懒加载只挂载空壳（按钮恒 disabled、内容不渲染）、截图全黑。
+  // 发布类 skill（百家号插图弹窗等）强依赖这几条。Page.bringToFront 对被遮挡窗口无效，必须靠参数兜底。
+  '--disable-backgrounding-occluded-windows',
+  '--disable-background-timer-throttling',
+  '--disable-renderer-backgrounding',
+  '--disable-features=CalculateNativeWinOcclusion',
+  process.argv[2] || 'about:blank', // 起始 URL 可命令行传入；默认空白页，不要硬编码业务站点
 ];
 
 console.log('=== 启动独立 Chrome 实例 ===');
