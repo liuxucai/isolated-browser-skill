@@ -135,3 +135,22 @@
 - **✅ 解决**：凡是「node 脚本 + 连本机 CDP」的命令，一律**申请沙箱豁免**执行
   （`dangerouslyDisableSandbox: true`）。这与 #9（launch 需后台保活）是两条独立的坑。
 - **判别法**：同一 URL，curl 通 + node refused → 沙箱问题，别去查 Chrome。
+
+### 17. 多任务共享隔离实例时互相「关标签 / 抢标签」（2026-10-16，跨 skill 通用）
+
+- **现象**：一个任务执行后，**别的任务**（微信公众号发布、seowhy 体验站、devdidi 等）正在用的标签
+  被关掉或被导航走。日志证据：
+  `[pathkit] 已关闭无关标签页 4 个: 6.seowhy.com/... | channels.weixin.qq.com/post/list | channels.weixin.qq.com/post/create | devdidi.seowhy.com/...`
+- **根因**：本 skill 的 `isolated` 指的是「**自动化 ↔ 用户日常浏览器**」这一对，
+  **没有**「**任务 ↔ 任务**」这一层的隔离。而所有任务被迫共用同一实例
+  （CDP 9222 + profile `~/.chrome_qclaw_stable`）——这是为**免登录复用**刻意共享的（登录页有验证码，无法自动登）。
+  在这个前提下，旧版 `connectCDP()` 的两处写法会主动伤人：
+  1. `closeOthers` 默认 `true`（只要传了 `keep`）→ `closePagesExcept()` 关掉所有不含 `keep` 的标签 = **清场清掉别人**；
+  2. 未命中 `keep` 时 `page = ctx.pages()[0]` = **顺手抢占别人的标签**（`goto` 一执行对方页面就跳走了）。
+- **✅ 解决**（2026-10-16 起）：
+  - `closeOthers` 默认改为 **false**（默认不再清场）；
+  - 选页改为「**keep 命中 → 复用空闲空白页 → 新建独立 tab**」，绝不抢占他人标签。
+  同 context 新建 tab 仍共享登录态，所以**免登录性质不变**，发布链路不受影响。
+- **需要旧清场行为时**：显式 `{ closeOthers: true }`，或设环境变量 **`PK_CLEAN=1`**
+  （标签太多导致 `connectOverCDP` 挂住时用，见 #14）。
+- **配套义务**：脚本收尾尽量 `await page.close()`，否则长跑后标签会缓慢堆积（内存开销很小，但不是零）。

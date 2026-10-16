@@ -9,9 +9,10 @@
  *   const { chromium } = pk.playwright();
  *
  * 布局说明：
- *   布局 A（仓库源）：   D:\skills\<skill>\scripts\...
- *   布局 B（接入加载）： ~/.workbuddy/skills\<skill>\scripts\...  (junction → D:\skills\<skill>)
- *   两种布局下 `../../isolated-browser/scripts/pathkit.js` 都指向本文件。
+ *   布局 A（旧仓库源）：   D:\skills\<skill>\scripts\...  （2026-10-16 起已废弃，整体迁走）
+ *   布局 B（统一根，现行）： F:\workbuddy-space\article\<skill>\scripts\...
+ *   布局 C（接入加载）：    ~/.workbuddy/skills\<skill>\scripts\...  (junction → F:\workbuddy-space\article\<skill>)
+ *   三种布局下 `../../isolated-browser/scripts/pathkit.js` 都指向本文件。
  *
  * 环境变量（都可选，用于覆盖探测结果）：
  *   WORKBUDDY_HOME         WorkBuddy 用户目录（默认 ~/.workbuddy）
@@ -71,6 +72,10 @@ function listDir(p) {
 function nodeModulesCandidates() {
   const c = [];
   if (process.env.OPENCLAW_NODE_MODULES) c.push(process.env.OPENCLAW_NODE_MODULES);
+
+  // ★ 发布依赖统一根（2026-10-16 起）：skills 根自带的 node_modules
+  //   （playwright-core 随 skill 一起管理，整体可搬迁、可备份）
+  c.push(path.join(SKILLS_ROOT, 'node_modules'));
 
   // WorkBuddy 托管 node 的 workspace（本机可能没有，存在才用）
   c.push(path.join(WORKBUDDY_HOME, 'binaries', 'node', 'workspace', 'node_modules'));
@@ -344,8 +349,9 @@ async function connectWithRetry(cr, port, timeout, log) {
  *
  * @param {object} opts
  * @param {number|string} [opts.port]         CDP 端口，默认 pk.cdpPort()
- * @param {string|string[]} [opts.keep]       目标页 URL 子串；给了就会关闭其它页
- * @param {boolean} [opts.closeOthers]        默认 true（仅当给了 keep）
+ * @param {string|string[]} [opts.keep]       目标页 URL 子串；命中则复用该页，未命中则新建独立标签
+ * @param {boolean} [opts.closeOthers]        默认 **false**（2026-10-16 起不再自动清场，避免误关其它任务的标签）；
+ *                                            显式设 true 或环境变量 PK_CLEAN=1 才恢复「关掉所有非目标页」的旧行为
  * @param {boolean} [opts.aggressive]         关闭时是否连 about:blank 也清
  * @param {number} [opts.timeout]             connectOverCDP 超时（ms），默认 45000
  * @param {boolean} [opts.log]                是否打印清理日志，默认 true
@@ -357,8 +363,14 @@ async function connectCDP(opts) {
   const log = opts.log !== false;
   ensureNoProxy();
 
+  // 默认**不再清场**（2026-10-16 起）：多任务可能共享同一个隔离实例（同一 CDP 端口 + 同一 profile，
+  // 这是为了免登录复用而刻意共享的），此时「关掉所有非目标页」会误关其它任务正在用的标签
+  // （实测误关过 微信公众号发布 / seowhy 体验站 / devdidi 等任务的标签）。
+  // 需要旧行为时：显式传 { closeOthers: true }，或设环境变量 PK_CLEAN=1。
+  const wantClean = opts.closeOthers === true
+    || (opts.closeOthers === undefined && process.env.PK_CLEAN === '1');
   let closed = [];
-  if (opts.closeOthers !== false && opts.keep) {
+  if (wantClean && opts.keep) {
     try {
       closed = await closePagesExcept(port, opts.keep, opts.aggressive);
       if (log && closed.length) console.log('[pathkit] 已关闭无关标签页 %d 个: %s', closed.length, closed.map(u => u.slice(0, 60)).join(' | '));
@@ -373,8 +385,13 @@ async function connectCDP(opts) {
 
   const keepList = (Array.isArray(opts.keep) ? opts.keep : [opts.keep]).filter(Boolean);
   let page = null;
+  // 1) 优先复用本次任务的目标页（keep 命中）
   if (keepList.length) page = ctx.pages().find(p => keepList.some(k => (p.url() || '').includes(k)));
-  if (!page) page = ctx.pages()[0] || (await ctx.newPage());
+  // 2) 其次复用「空闲空白页」（抢占空白页无副作用）
+  if (!page) page = ctx.pages().find(p => /^(about:blank|chrome:\/\/newtab\/?|chrome:\/\/new-tab-page\/?)$/.test((p.url() || '').trim()));
+  // 3) 最后**新建独立标签**——同 context 新建 tab 仍共享登录态，但绝不抢占其它任务的标签。
+  //    （2026-10-16 前是 `ctx.pages()[0]`：会把别的任务正在用的标签抢走，`goto` 一执行对方页面就跳走了）
+  if (!page) page = await ctx.newPage();
   return { browser, ctx, page, closed };
 }
 

@@ -84,6 +84,12 @@ pk.imageDir();                               // 配图素材目录
 const { page, browser, closed } = await pk.connectCDP({ keep: 'mp.toutiao.com' });
 ```
 
+> **默认不清场**（2026-10-16 起）：`connectCDP()` **不会**再关闭任何非目标标签页，
+> 也不会抢占别人正在用的标签——多任务可能共用同一隔离实例（同 CDP 端口 + 同 profile），
+> 清场/抢占会误伤其它任务的标签（见 `references/pitfalls.md` #17）。
+> 命中 `keep` 则复用该页；否则复用空闲空白页，再否则**新建独立 tab**（同 context，登录态照旧共享）。
+> 需要旧行为时：`{ closeOthers: true }` 或设 `PK_CLEAN=1`。
+
 | 导出 | 作用 | 可覆盖的环境变量 |
 |---|---|---|
 | `playwright()` / `chromium()` / `resolvePlaywright()` | 定位并加载 playwright-core | `OPENCLAW_NODE_MODULES` |
@@ -93,8 +99,8 @@ const { page, browser, closed } = await pk.connectCDP({ keep: 'mp.toutiao.com' }
 | `cdpPort()` / `profileDir()` | CDP 端口 / 隔离 profile 目录 | `ISOB_CDP_PORT` / `ISOB_PROFILE_DIR` |
 | `ensureNoProxy()` | 回环地址补进 NO_PROXY（防沙箱代理劫持 CDP，pitfalls #13） | — |
 | `cdpList()` / `cdpClose()` / `cdpActivate()` | CDP HTTP API：列/关/激活标签页 | — |
-| `closePagesExcept()` | 关掉非目标标签页（**保证至少留 1 页**，防把 Chrome 关到退出，pitfalls #14/#15） | — |
-| `connectCDP()` / `connectWithRetry()` | playwright 直连 CDP（自动清页 + ECONNREFUSED 重试 3 次） | — |
+| `closePagesExcept()` | 关掉非目标标签页（**保证至少留 1 页**，防把 Chrome 关到退出，pitfalls #14/#15）；**默认不再被自动调用**，仅在显式传 `closeOthers:true` 或设 `PK_CLEAN=1` 时触发 | — |
+| `connectCDP()` / `connectWithRetry()` | playwright 直连 CDP（**默认不清场**：只新建/复用本任务标签，绝不关或抢他人标签 + ECONNREFUSED 重试 3 次，pitfalls #17） | `PK_CLEAN` |
 | `isobLaunch()` | 本 skill 的 `launch.js` 绝对路径 | — |
 | `imageDir()` | 配图素材目录 | `PUBLISH_IMAGE_DIR` |
 | `WORKBUDDY_HOME` / `SKILLS_ROOT` | WorkBuddy 用户目录 / skills 根目录 | `WORKBUDDY_HOME` |
