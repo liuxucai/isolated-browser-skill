@@ -27,6 +27,7 @@
 'use strict';
 
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
 
@@ -223,6 +224,160 @@ function isobLaunch() {
   return path.join(ISOB_SCRIPTS_DIR, 'launch.js').replace(/\\/g, '/');
 }
 
+// ------------------------------------------------------- CDP 连接（含两个必踩的坑）
+
+/**
+ * 坑 1：把回环地址加入 NO_PROXY。
+ *
+ * 沙箱 / 某些 CI 环境会注入 `http_proxy=http://127.0.0.1:<port>`。
+ * playwright 请求 `http://127.0.0.1:9222/json/version` 时会走这个代理，
+ * 拿回的 webSocketDebuggerUrl 被改写成代理端口（如 ws://127.0.0.1:9300/...），
+ * 于是 connectOverCDP 永远连不上（表现为 30s 超时，日志里 ws 端口是代理端口）。
+ *
+ * 只补 NO_PROXY、不动 http_proxy —— 需要联网下载图片的脚本仍可走代理。
+ */
+function ensureNoProxy() {
+  const add = ['127.0.0.1', 'localhost', '::1'];
+  for (const key of ['NO_PROXY', 'no_proxy']) {
+    const cur = String(process.env[key] || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const h of add) if (!cur.includes(h)) cur.push(h);
+    process.env[key] = cur.join(',');
+  }
+}
+
+/** 取回文本（node http 不读 http_proxy，用于本机 CDP HTTP 端点最稳） */
+function httpText(url, timeout) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, res => {
+      let d = '';
+      res.setEncoding('utf8');
+      res.on('data', c => { d += c; });
+      res.on('end', () => resolve(d));
+    });
+    req.setTimeout(timeout || 5000, () => req.destroy(new Error('timeout ' + url)));
+    req.on('error', reject);
+  });
+}
+
+/** 列出 CDP 当前所有 target（/json/list） */
+async function cdpList(port) {
+  const txt = await httpText(`http://127.0.0.1:${port}/json/list`, 5000);
+  return JSON.parse(txt);
+}
+
+/** 关闭一个 target（/json/close/<id>） */
+async function cdpClose(port, targetId) {
+  return httpText(`http://127.0.0.1:${port}/json/close/${encodeURIComponent(targetId)}`, 5000);
+}
+
+/** 激活（切到前台）一个 target */
+async function cdpActivate(port, targetId) {
+  return httpText(`http://127.0.0.1:${port}/json/activate/${encodeURIComponent(targetId)}`, 5000);
+}
+
+/**
+ * 坑 2：关闭与目标无关的标签页。
+ *
+ * playwright 的 connectOverCDP 会初始化浏览器里**所有**已有 page target；
+ * 只要有任意一个页面的渲染进程处于僵死 / 长任务卡顿状态，其 CDP 命令就永远不返回，
+ * connectOverCDP 会一直挂着（连默认 30s timeout 都救不了，因为它在等 Promise 而非命令超时）。
+ * 实测：同一实例 19 个标签时连不上；清到只剩 1 个目标页后 0.1s 连上。
+ *
+ * 坑 3（2026-10-12 新增）：**绝不能把页面关到一个不剩**。
+ * Chrome 关掉最后一个标签页 = 关闭窗口 = 进程退出，`--remote-debugging-port` 随之消失，
+ * 后续 connectOverCDP 直接 ECONNREFUSED（实测踩到）。因此本函数保证至少留 1 个页面。
+ *
+ * @param {number|string} port
+ * @param {string|string[]} keep 要保留的 URL 子串（可多个）
+ * @param {boolean} [aggressive] true=连 about:blank/新标签页也关
+ * @returns {Promise<string[]>} 被关闭页面的 URL 列表
+ */
+async function closePagesExcept(port, keep, aggressive) {
+  const keepList = (Array.isArray(keep) ? keep : [keep]).filter(Boolean);
+  if (!keepList.length) return [];
+  const targets = (await cdpList(port)).filter(t => t.type === 'page');
+  const closable = targets.filter(t => {
+    const url = t.url || '';
+    if (keepList.some(k => url.includes(k))) return false;
+    // 默认保留 devtools / 扩展页；aggressive 时连 about:blank 也清
+    if (!aggressive && /^(devtools:|chrome-extension:|chrome:)/.test(url)) return false;
+    return true;
+  });
+  // 保证至少剩 1 个页面（见「坑 3」）
+  while (targets.length - closable.length < 1 && closable.length) closable.pop();
+
+  const closed = [];
+  for (const t of closable) {
+    try {
+      await cdpClose(port, t.id);
+      closed.push(t.url || '(blank)');
+    } catch (_) { /* 忽略单个失败 */ }
+  }
+  return closed;
+}
+
+/**
+ * 带重试的 connectOverCDP。
+ * ECONNREFUSED 常见于两种瞬时状态：隔离 Chrome 刚被清空页面后短暂重整、
+ * 或进程刚被沙箱回收正在重启。重试 3 次基本都能过。
+ */
+async function connectWithRetry(cr, port, timeout, log) {
+  let last;
+  for (let i = 1; i <= 3; i++) {
+    try {
+      return await cr.connectOverCDP(`http://127.0.0.1:${port}`, { timeout });
+    } catch (e) {
+      last = e;
+      if (log) console.warn('[pathkit] connectOverCDP 第 %d 次失败: %s', i, String(e.message).split('\n')[0]);
+      if (i < 3) await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  throw last;
+}
+
+/**
+ * 共享的 playwright 直连 CDP 连接器（覆盖上面两个坑）。
+ *
+ * @example
+ *   const pk = require('../../isolated-browser/scripts/pathkit.js');
+ *   const { page } = await pk.connectCDP({ keep: 'mp.toutiao.com' });
+ *
+ * @param {object} opts
+ * @param {number|string} [opts.port]         CDP 端口，默认 pk.cdpPort()
+ * @param {string|string[]} [opts.keep]       目标页 URL 子串；给了就会关闭其它页
+ * @param {boolean} [opts.closeOthers]        默认 true（仅当给了 keep）
+ * @param {boolean} [opts.aggressive]         关闭时是否连 about:blank 也清
+ * @param {number} [opts.timeout]             connectOverCDP 超时（ms），默认 45000
+ * @param {boolean} [opts.log]                是否打印清理日志，默认 true
+ * @returns {Promise<{browser:any, ctx:any, page:any, closed:string[]}>}
+ */
+async function connectCDP(opts) {
+  opts = opts || {};
+  const port = opts.port || cdpPort();
+  const log = opts.log !== false;
+  ensureNoProxy();
+
+  let closed = [];
+  if (opts.closeOthers !== false && opts.keep) {
+    try {
+      closed = await closePagesExcept(port, opts.keep, opts.aggressive);
+      if (log && closed.length) console.log('[pathkit] 已关闭无关标签页 %d 个: %s', closed.length, closed.map(u => u.slice(0, 60)).join(' | '));
+    } catch (e) {
+      if (log) console.warn('[pathkit] 清理标签页失败（忽略继续）:', e.message);
+    }
+  }
+
+  const { chromium: cr } = resolvePlaywright();
+  const browser = await connectWithRetry(cr, port, opts.timeout || 45000, log);
+  const ctx = (browser.contexts() && browser.contexts()[0]) || (await browser.newContext());
+
+  const keepList = (Array.isArray(opts.keep) ? opts.keep : [opts.keep]).filter(Boolean);
+  let page = null;
+  if (keepList.length) page = ctx.pages().find(p => keepList.some(k => (p.url() || '').includes(k)));
+  if (!page) page = ctx.pages()[0] || (await ctx.newPage());
+  return { browser, ctx, page, closed };
+}
+
 // ---------------------------------------------------------------- 配图目录
 
 /**
@@ -286,6 +441,14 @@ module.exports = {
   isobLaunch,
   imageDir,
   info,
+  // CDP 连接（含代理绕过 + 清理无关标签页两个必备修复）
+  ensureNoProxy,
+  cdpList,
+  cdpClose,
+  cdpActivate,
+  closePagesExcept,
+  connectWithRetry,
+  connectCDP,
 };
 
 // 直接执行时打印环境快照：node pathkit.js --info

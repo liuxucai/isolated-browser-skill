@@ -37,6 +37,30 @@ node -e "const pk=require('./skills/isolated-browser/scripts/pathkit.js'); pk.ch
   需要它时先安装再启用；在此之前请直接用 playwright-core。
 - 除本机外的其他环境若已装 agent-browser，仍可按本文档上半部分原方式使用。
 
+## `scripts/pick_images.js` / `post_images.js` —— 配图挑选与规划（所有发布类 skill 共用）
+
+> 2026-10-12 新增，配合「所有平台正文配图统一 3 张 + 封面能设 3 张就设 3 张」的约定。
+> **完整约定（统一参数命名、锚点算法、跨平台通用坑、各平台验证状态）见
+> [references/multi-image.md](references/multi-image.md)**——改配图逻辑前必读，禁止在单个 skill 里另发明一套参数。
+
+| 脚本 | 作用 |
+|---|---|
+| `pick_images.js` | 按「文章标签 → 素材库」挑最相关的 Top-N 张（默认 3）。先由 `tag.txt` 匹配文章标签，再按标签从 `pic-tag.txt` 挑图；素材目录自动探测（`--dir` → `PUBLISH_IMAGE_DIR` → `../car` → `~/car` → `./car`） |
+| `post_images.js` | 规划一次发布的配图：解析 `--image`（可重复）/`--no-image`/`--image-top`，或自动挑选；并算出每张图的插入锚点（`spread` 均分 / `group` 连续） |
+
+各发布 skill 引用方式（相对路径，禁止写死盘符）：
+```js
+const { planImages } = require('../../isolated-browser/scripts/post_images.js');
+const { images, slots } = planImages({
+  explicit: args.image, keyword: '婚车租车', tags: ['婚庆用车', '婚庆婚车车队'], top: 3, paraCount: 13,
+});
+```
+
+命令行直接挑图：
+```bash
+node skills/isolated-browser/scripts/pick_images.js --keyword 婚车租车 --tags "婚庆用车,婚庆婚车车队" --top 3
+```
+
 ## `scripts/pathkit.js` —— 跨机器路径解析（发布类 skill 的公共底座）
 
 所有"路径写死"问题的统一解法。**不写死用户名、盘符、Node 版本号、node_modules 位置**，
@@ -55,6 +79,9 @@ pk.nodeExe();                                // 托管 node（取最新版本）
 pk.findChrome();                             // Chrome 可执行文件
 pk.cdpPort();                                // CDP 端口（ISOB_CDP_PORT 可覆盖）
 pk.imageDir();                               // 配图素材目录
+
+// ⭐ 推荐：用 connectCDP() 连接（自动处理「沙箱代理劫持」+「僵死标签页挂死」两大坑）
+const { page, browser, closed } = await pk.connectCDP({ keep: 'mp.toutiao.com' });
 ```
 
 | 导出 | 作用 | 可覆盖的环境变量 |
@@ -64,9 +91,28 @@ pk.imageDir();                               // 配图素材目录
 | `nodeExe()` | 托管 node 可执行文件（自动取最新版本） | `NODE_EXE` |
 | `findChrome()` | Chrome 可执行文件 | `CHROME_PATH` / `AGENT_BROWSER_EXECUTABLE_PATH` |
 | `cdpPort()` / `profileDir()` | CDP 端口 / 隔离 profile 目录 | `ISOB_CDP_PORT` / `ISOB_PROFILE_DIR` |
+| `ensureNoProxy()` | 回环地址补进 NO_PROXY（防沙箱代理劫持 CDP，pitfalls #13） | — |
+| `cdpList()` / `cdpClose()` / `cdpActivate()` | CDP HTTP API：列/关/激活标签页 | — |
+| `closePagesExcept()` | 关掉非目标标签页（**保证至少留 1 页**，防把 Chrome 关到退出，pitfalls #14/#15） | — |
+| `connectCDP()` / `connectWithRetry()` | playwright 直连 CDP（自动清页 + ECONNREFUSED 重试 3 次） | — |
 | `isobLaunch()` | 本 skill 的 `launch.js` 绝对路径 | — |
 | `imageDir()` | 配图素材目录 | `PUBLISH_IMAGE_DIR` |
 | `WORKBUDDY_HOME` / `SKILLS_ROOT` | WorkBuddy 用户目录 / skills 根目录 | `WORKBUDDY_HOME` |
+
+## `scripts/check-login.js` —— 跨平台登录态一键复核（发布类 skill 共用）
+
+批量发布前先跑一遍，确认哪些平台还登录着，避免跑到一半才发现被踢到扫码页。
+
+```bash
+node skills/isolated-browser/scripts/check-login.js              # 全部 11 个平台
+node skills/isolated-browser/scripts/check-login.js sohu qq      # 只查指定平台
+node skills/isolated-browser/scripts/check-login.js --json       # 机器可读输出
+```
+
+- 判定口径：URL 是否仍停在工作台域 + 页面是否含登录特征（passport/signin/扫码登录），
+  避免把「域名对但内容是扫码页」误判成已登录。
+- 连接层内置 `ensureNoProxy()` + 清无关标签页，复用 `pathkit.js` 的全部修复。
+- ⚠️ 本机（WorkBuddy 沙箱）运行本脚本同样需要**沙箱豁免**（pitfalls #16：node 直连本机 CDP 被拦）。
 
 
 ## 这是什么
@@ -148,10 +194,17 @@ isolated-browser/
 ├── SKILL.md                       ← 本文件
 ├── scripts/
 │   ├── launch.js                  ← 拉起隔离 Chrome（detached 常驻，固定 ~/.chrome_qclaw_stable）
-│   └── connect.js                 ← agent-browser --cdp 基础封装 + 连通性检查
+│   ├── connect.js                 ← agent-browser --cdp 基础封装 + 连通性检查（本机未装 agent-browser，不可用）
+│   ├── pathkit.js                 ← 跨机器路径解析 + CDP 连接层（playwright-core 定位 / connectCDP / 清标签页）
+│   ├── check-login.js             ← 跨平台登录态一键复核（11 平台，2026-10-12）
+│   ├── pick_images.js             ← 按标签从素材库挑 Top-N 配图（2026-10-12）
+│   └── post_images.js             ← 配图规划：显式/自动挑选 + 插入锚点（2026-10-12）
 └── references/
+    ├── multi-image.md             ← **跨平台「配图 3 张 + 封面」统一约定**（2026-10-12）
     ├── template.md                ← 复制即用的最小模板（JS + bash）
-    └── pitfalls.md                ← 已踩过的坑（--profile挂起/GBK乱码/端口占用/spawnSync需shell:true）
+    └── pitfalls.md                ← 已踩过的坑（--profile挂起/GBK乱码/端口占用/spawnSync需shell:true
+                                    /   沙箱回收detached/写D盘被杀/代理劫持CDP/僵死标签页挂死
+                                    /   关光标签页=关浏览器/沙箱拦node直连CDP）
 ```
 
-详见 [references/template.md](references/template.md) 与 [references/pitfalls.md](references/pitfalls.md)。
+详见 [references/multi-image.md](references/multi-image.md)、[references/template.md](references/template.md) 与 [references/pitfalls.md](references/pitfalls.md)。

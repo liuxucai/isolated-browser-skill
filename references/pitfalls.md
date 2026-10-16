@@ -52,9 +52,26 @@
 
   父进程存活期间（2 小时）Chrome 全程可用；发布完可直接结束该后台任务。
 
+- ⚠️ **「到期」信号要会认**：后台保活命令跑满 `sleep 7200` 后会**自然结束**，
+  你会收到一条 `Background command … completed` 的任务通知。**这不代表发布失败，只是保活到期**。
+  Chrome 通常会再多活一会儿，但应**尽快重新拉起保活**（再跑一次同样的
+  `launch.js "<任意URL>" && sleep 7200`）以免被沙箱回收。
+  存活性判定：`curl -s --noproxy '*' http://127.0.0.1:9222/json/version` 有 JSON 响应即还活着。
+  （2026-10-12 实测：一晚内先后收到头条/公众号/抖音三个历史保活会话的到期通知，Chrome 均未掉线。）
+
 ### 10. playwright-core 就是本机的驱动层（替代 agent-browser）
 
 - **位置**：不固定，由 `scripts/pathkit.js` 运行时探测（依次试 `OPENCLAW_NODE_MODULES` → WorkBuddy 托管 node 的 workspace → OpenClaw/qclaw 安装目录 → 就近 `node_modules`）。
+- ⚠️ **本机实测（2026-10-13）：qclaw 目录整体消失导致全部脚本瘫痪**。
+  原可解析的 `F:\qclaw\<ver>\resources\openclaw\node_modules` 因 `F:\qclaw` 被移除而失效，
+  所有 publisher 脚本统一报「未找到 playwright-core」。**处置**——重装到 pathkit 的**首选**位置：
+  ```bash
+  node "<node>/node_modules/npm/bin/npm-cli.js" i playwright-core \
+       --prefix "$HOME/.workbuddy/binaries/node/workspace" --no-audit --no-fund
+  ```
+  ⚠️ **必须带 `--prefix`**：不带时本机 npm 会按默认 root 装到 `C:\Users\<用户名>\node_modules`，
+  pathkit 探测不到那个位置。装完用 `node isolated-browser/scripts/pathkit.js --info`
+  确认 `nodeModules` 非空即成功。
 - **用法**：脚本 `require('../../isolated-browser/scripts/pathkit.js').resolvePlaywright()` 即可，**不需要**手工设环境变量；要强制指定时才设 `OPENCLAW_NODE_MODULES`。
 - **连接**：`chromium.connectOverCDP('http://127.0.0.1:9222')`，本机实测通过（沙箱内直连 127.0.0.1 无阻）。
 - **`connect.js` 的定位**：它是 `agent-browser --cdp` 封装，本机装好 agent-browser 前不可用；
@@ -75,3 +92,46 @@
 - **git 不在 PATH**：在 `~/.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe`。
 - **git-bash 调 node 传参**：`/c/Users/...` 会被拼成 `c:\c\Users\...` 报 `MODULE_NOT_FOUND`，
   要传 `C:/Users/...` 风格路径。
+
+### 13. 沙箱代理劫持 CDP 连接（2026-10-12，跨 skill 通用）
+
+- **现象**：playwright `connectOverCDP` 30s 超时，日志里 ws 地址被改写成
+  `ws://127.0.0.1:9300/...`（9300 是沙箱 HTTP 代理端口，不是 Chrome）。
+- **根因**：沙箱注入 `http_proxy=http://127.0.0.1:9300`，playwright 请求
+  `http://127.0.0.1:9222/json/version` 时走了代理，返回的 webSocketDebuggerUrl 被改写。
+- **✅ 解决**：把回环地址加进 `NO_PROXY`（不动 http_proxy，联网下载图片仍可走代理）。
+  已固化在 `pathkit.js` 的 `ensureNoProxy()`，`connectCDP()` 会自动调用；
+  手写脚本直接连时务必自行设置 `NO_PROXY=127.0.0.1,localhost`。
+
+### 14. 「僵死」标签页让 connectOverCDP 永久挂起（2026-10-12，跨 skill 通用）
+
+- **现象**：浏览器开了十几个标签页时 connectOverCDP 超时；清到只剩目标页后 **0.1s 连上**。
+- **根因**：connectOverCDP 会初始化**所有**已有 page target；只要任意一个页面的渲染进程
+  无响应（其 CDP session 的 `Page.enable` 等命令永远不返回，用 `DEBUG=pw:protocol` 可见
+  大量 pending 命令），整个连接就挂死——连默认 timeout 都救不了，因为它在等 Promise。
+- **✅ 解决**：连接前用 CDP HTTP API（`/json/list` + `/json/close`）关闭非目标页面。
+  已固化在 `pathkit.js` 的 `closePagesExcept()` / `connectCDP({ keep: '目标域名' })`。
+- **注意**：目标页自己也可能僵死（表现：DOM 在、evaluate 通、但点击零反应且无遮罩拦截），
+  此时关闭重开页面是唯一解；"长时间开着的编辑页"尤其容易这样（头条实测：封面加号块、
+  radio 全部点不动，reload 也无效）。
+
+### 15. 把页面关到 0 个 = 关掉 Chrome 窗口 = 进程退出（2026-10-12，跨 skill 通用）
+
+- **现象**：`closePagesExcept` 清理后（keep 列表没匹配到任何页面时，会把**所有**标签页都关掉），
+  紧接着 `connectOverCDP` 报 `connect ECONNREFUSED 127.0.0.1:9222`，但几秒前 `/json/version` 还正常。
+- **根因**：Chrome 关掉**最后一个**标签页 = 关闭窗口 = 进程退出，`--remote-debugging-port` 随之消失。
+  keep 子串没写对（或页面 URL 变了）时，"保留目标页" 就变成了 "关光所有页"。
+- **✅ 解决**：`closePagesExcept()` 内置**至少留 1 个页面**的保护（2026-10-12 起生效）；
+  另外 `connectCDP()` 增加了 `connectWithRetry`（ECONNREFUSED 自动重试 3 次，间隔 1.5s）。
+- **自检口诀**：调 `closePagesExcept` 前先 `/json/list` 确认 keep 子串真的能命中目标页。
+
+### 16. 沙箱内 node 直连本机 CDP 也会被拒（2026-10-12，跨 skill 通用）
+
+- **现象**：`curl http://127.0.0.1:9222/json/version` 通（curl 走沙箱代理转发），但
+  同一条 Bash 命令里 `node -e "http.get('http://127.0.0.1:9222/...')"` 报 `ECONNREFUSED`；
+  `node check-login.js` 同样报连不上——**即使 URL 一样**。
+- **根因**：WorkBuddy 沙箱对 node 的原生 TCP 直连做了拦截；curl 因走 HTTP 代理（9300）
+  反而能到。即 #13 的反面：加了 `NO_PROXY` 后 node 直连，直连本身被沙箱拦。
+- **✅ 解决**：凡是「node 脚本 + 连本机 CDP」的命令，一律**申请沙箱豁免**执行
+  （`dangerouslyDisableSandbox: true`）。这与 #9（launch 需后台保活）是两条独立的坑。
+- **判别法**：同一 URL，curl 通 + node refused → 沙箱问题，别去查 Chrome。
